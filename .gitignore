@@ -1,0 +1,8 @@
+cmpd
+obj/
+*.o
+*.d
+*.swp
+*.swo
+tags
+compile_commands.json
