@@ -2,10 +2,10 @@ CC      ?= gcc
 CXX     ?= g++
 CFLAGS  ?= -Og -g -Wall -Wextra -pedantic
 CXXFLAGS?= -Og -g -Wall -Wextra -pedantic
-CFLAGS  += $(shell pkg-config --cflags libavformat libavcodec libavutil libswresample portaudio-2.0 ncursesw taglib)
+CFLAGS  += $(shell pkg-config --cflags libavformat libavcodec libavutil libswresample portaudio-2.0 ncursesw panelw taglib)
 CFLAGS  += -Ithird_party -Isrc
 CXXFLAGS+= $(CFLAGS)
-LDLIBS  := $(shell pkg-config --libs libavformat libavcodec libavutil libswresample portaudio-2.0 ncursesw taglib)
+LDLIBS  := $(shell pkg-config --libs libavformat libavcodec libavutil libswresample portaudio-2.0 ncursesw panelw taglib)
 LDLIBS  += -lm -lpthread -lstdc++
 
 SRCDIR  := src

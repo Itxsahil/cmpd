@@ -2,11 +2,11 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libavutil/avutil.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 
 #include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 
 struct Decoder {
@@ -17,6 +17,11 @@ struct Decoder {
     int              channels;
     int              sample_rate;
     double           duration;
+    int64_t          frames_decoded;
+    int              eof;
+
+    AVPacket        *pkt;
+    int              pkt_done;
 };
 
 Decoder *decoder_open(const char *path)
@@ -46,32 +51,33 @@ Decoder *decoder_open(const char *path)
     if (avcodec_open2(dec->codec_ctx, codec, NULL) < 0)
         goto fail;
 
-    dec->channels   = dec->codec_ctx->ch_layout.nb_channels;
-    dec->sample_rate = dec->codec_ctx->sample_rate;
-
-    AVRational dur = dec->fmt_ctx->streams[idx]->time_base;
+    AVRational tb = dec->fmt_ctx->streams[idx]->time_base;
     int64_t d = dec->fmt_ctx->streams[idx]->duration;
     if (d != AV_NOPTS_VALUE)
-        dec->duration = (double)d * dur.num / dur.den;
+        dec->duration = (double)d * av_q2d(tb);
+
+    dec->channels   = dec->codec_ctx->ch_layout.nb_channels;
+    dec->sample_rate = dec->codec_ctx->sample_rate;
 
     dec->swr = swr_alloc();
     if (!dec->swr) goto fail;
 
-    AVChannelLayout out_ch = AV_CHANNEL_LAYOUT_STEREO;
-    int out_rate = dec->sample_rate;
-    enum AVSampleFormat out_fmt = AV_SAMPLE_FMT_FLT;
+    AVChannelLayout out_ch;
+    av_channel_layout_default(&out_ch, dec->channels);
 
     int ret = swr_alloc_set_opts2(&dec->swr,
-                                  &out_ch, out_fmt, out_rate,
+                                  &out_ch, AV_SAMPLE_FMT_FLT, dec->sample_rate,
                                   &dec->codec_ctx->ch_layout,
                                   dec->codec_ctx->sample_fmt,
                                   dec->codec_ctx->sample_rate,
                                   0, NULL);
     if (ret < 0) goto fail;
     if (swr_init(dec->swr) < 0) goto fail;
+    av_channel_layout_uninit(&out_ch);
 
-    dec->channels   = out_ch.nb_channels;
-    dec->sample_rate = out_rate;
+    dec->pkt = av_packet_alloc();
+    if (!dec->pkt) goto fail;
+    dec->pkt_done = 1;
 
     return dec;
 
@@ -80,36 +86,30 @@ fail:
     return NULL;
 }
 
-int decoder_channels(Decoder *dec) { return dec->channels; }
+int decoder_channels(Decoder *dec)   { return dec->channels; }
 int decoder_sample_rate(Decoder *dec) { return dec->sample_rate; }
 double decoder_duration(Decoder *dec) { return dec->duration; }
+double decoder_position(Decoder *dec) {
+    return dec->sample_rate > 0
+        ? (double)dec->frames_decoded / dec->sample_rate : 0.0;
+}
+int decoder_eof(Decoder *dec) { return dec->eof; }
 
-int decoder_decode(Decoder *dec, decoder_cb cb, void *userdata)
+int decoder_read(Decoder *dec, float *buf, int max_frames)
 {
-    AVPacket *pkt = av_packet_alloc();
-    AVFrame  *frame = av_frame_alloc();
-    if (!pkt || !frame) { av_packet_free(&pkt); av_frame_free(&frame); return -1; }
+    if (!dec || dec->eof) return 0;
 
-    int ret = 0;
-    while (av_read_frame(dec->fmt_ctx, pkt) >= 0) {
-        if (pkt->stream_index != dec->stream_idx) {
-            av_packet_unref(pkt);
-            continue;
-        }
-        if (avcodec_send_packet(dec->codec_ctx, pkt) < 0) {
-            av_packet_unref(pkt);
-            ret = -1;
-            break;
-        }
-        av_packet_unref(pkt);
+    AVFrame *frame = av_frame_alloc();
+    if (!frame) return -1;
 
-        while (1) {
-            int r = avcodec_receive_frame(dec->codec_ctx, frame);
-            if (r == AVERROR(EAGAIN) || r == AVERROR_EOF)
-                break;
-            if (r < 0) { ret = -1; goto done; }
+    int total = 0;
 
-            uint8_t *out[2] = {0};
+    while (total < max_frames && !dec->eof) {
+        /* try to read a decoded frame first */
+        int r = avcodec_receive_frame(dec->codec_ctx, frame);
+        if (r == 0) {
+            /* convert to float */
+            uint8_t *out[8] = {0};
             int out_samples = swr_get_out_samples(dec->swr, frame->nb_samples);
             av_samples_alloc(out, NULL, dec->channels,
                              out_samples, AV_SAMPLE_FMT_FLT, 0);
@@ -118,62 +118,64 @@ int decoder_decode(Decoder *dec, decoder_cb cb, void *userdata)
                                         (const uint8_t **)frame->extended_data,
                                         frame->nb_samples);
             if (converted > 0) {
-                int total = converted * dec->channels;
-                float *interleaved = malloc(total * sizeof(float));
-                if (interleaved) {
-                    for (int i = 0; i < converted; i++)
-                        for (int c = 0; c < dec->channels; c++)
-                            interleaved[i * dec->channels + c] =
-                                ((float *)out[c])[i];
-                    cb(interleaved, converted, dec->channels,
-                       dec->sample_rate, userdata);
-                    free(interleaved);
-                }
+                int room = max_frames - total;
+                int copy = converted < room ? converted : room;
+                for (int i = 0; i < copy; i++)
+                    for (int c = 0; c < dec->channels; c++)
+                        buf[(total + i) * dec->channels + c] =
+                            ((float *)out[c])[i];
+                total += copy;
+                dec->frames_decoded += copy;
             }
             av_freep(&out[0]);
             av_frame_unref(frame);
+            continue;
         }
-    }
 
-    avcodec_send_packet(dec->codec_ctx, NULL);
-    while (1) {
-        int r = avcodec_receive_frame(dec->codec_ctx, frame);
-        if (r == AVERROR_EOF) break;
-        if (r < 0) break;
-
-        uint8_t *out[2] = {0};
-        int out_samples = swr_get_out_samples(dec->swr, frame->nb_samples);
-        av_samples_alloc(out, NULL, dec->channels,
-                         out_samples, AV_SAMPLE_FMT_FLT, 0);
-
-        int converted = swr_convert(dec->swr, out, out_samples,
-                                    (const uint8_t **)frame->extended_data,
-                                    frame->nb_samples);
-        if (converted > 0) {
-            int total = converted * dec->channels;
-            float *interleaved = malloc(total * sizeof(float));
-            if (interleaved) {
-                for (int i = 0; i < converted; i++)
-                    for (int c = 0; c < dec->channels; c++)
-                        interleaved[i * dec->channels + c] =
-                            ((float *)out[c])[i];
-                cb(interleaved, converted, dec->channels,
-                   dec->sample_rate, userdata);
-                free(interleaved);
+        if (r == AVERROR(EAGAIN)) {
+            /* need more packets — send one */
+            if (dec->pkt_done) {
+                if (av_read_frame(dec->fmt_ctx, dec->pkt) < 0) {
+                    /* no more packets — drain decoder */
+                    avcodec_send_packet(dec->codec_ctx, NULL);
+                    dec->pkt_done = 0;
+                    continue;
+                }
+                if (dec->pkt->stream_index != dec->stream_idx) {
+                    av_packet_unref(dec->pkt);
+                    continue;
+                }
+                dec->pkt_done = 0;
             }
+
+            int ret = avcodec_send_packet(dec->codec_ctx, dec->pkt);
+            av_packet_unref(dec->pkt);
+            dec->pkt_done = 1;
+            if (ret < 0) {
+                /* error sending packet */
+                av_frame_free(&frame);
+                return -1;
+            }
+            continue;
         }
-        av_freep(&out[0]);
-        av_frame_unref(frame);
+
+        if (r == AVERROR_EOF) {
+            dec->eof = 1;
+            break;
+        }
+
+        /* real error */
+        av_frame_free(&frame);
+        return -1;
     }
 
-done:
     av_frame_free(&frame);
-    av_packet_free(&pkt);
-    return ret;
+    return total;
 }
 
 int decoder_seek(Decoder *dec, double seconds)
 {
+    if (!dec) return -1;
     AVRational tb = dec->fmt_ctx->streams[dec->stream_idx]->time_base;
     int64_t ts = (int64_t)(seconds / av_q2d(tb));
     int r = av_seek_frame(dec->fmt_ctx, dec->stream_idx, ts, AVSEEK_FLAG_ANY);
@@ -181,12 +183,15 @@ int decoder_seek(Decoder *dec, double seconds)
     avcodec_flush_buffers(dec->codec_ctx);
     swr_close(dec->swr);
     swr_init(dec->swr);
+    dec->frames_decoded = (int64_t)(seconds * dec->sample_rate);
+    dec->eof = 0;
     return 0;
 }
 
 void decoder_close(Decoder *dec)
 {
     if (!dec) return;
+    av_packet_free(&dec->pkt);
     swr_free(&dec->swr);
     avcodec_free_context(&dec->codec_ctx);
     avformat_close_input(&dec->fmt_ctx);
