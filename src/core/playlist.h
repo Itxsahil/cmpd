@@ -18,7 +18,8 @@ typedef struct {
 typedef struct Playlist Playlist;
 
 Playlist *playlist_create(void);
-void      playlist_add(Playlist *pl, const Track *t);
+/* Returns 0 on success, -1 if the list could not grow. */
+int       playlist_add(Playlist *pl, const Track *t);
 void      playlist_remove(Playlist *pl, int idx);
 void      playlist_clear(Playlist *pl);
 int       playlist_count(Playlist *pl);
