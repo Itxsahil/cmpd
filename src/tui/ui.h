@@ -21,6 +21,9 @@ typedef enum {
     ACTION_TOGGLE_SHUFFLE,
     ACTION_CYCLE_REPEAT,
     ACTION_PLAY_SELECTED,
+    ACTION_SEEK_FWD,
+    ACTION_SEEK_BACK,
+    ACTION_TOGGLE_HELP,
 } UIAction;
 
 typedef struct {
@@ -40,9 +43,13 @@ typedef struct {
     int      scroll;
 
     UIMode   mode;
+    int      show_help;
     char     search_buf[256];
     int      search_pos;
 } UIState;
+
+/* Seconds moved per seek keypress. */
+#define UI_SEEK_STEP 5.0
 
 void ui_init(void);
 void ui_draw(UIState *state);

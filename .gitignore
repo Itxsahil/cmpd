@@ -1,5 +1,9 @@
 cmpd
+cmpd-asan
+cmpd-tsan
 obj/
+obj-asan/
+obj-tsan/
 *.o
 *.d
 *.swp
