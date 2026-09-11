@@ -1,0 +1,70 @@
+# Valgrind suppressions for cmpd's test suite.
+#
+# ALSA reads uninitialised padding inside its hw_params structures by design,
+# and PortAudio and JACK allocate state that lives until process exit. Neither
+# is reachable from cmpd's own code, so without these the output test buries a
+# real finding under millions of third-party reports.
+#
+# Deliberately scoped to the innermost frame being in one of those libraries:
+# anything originating in cmpd is still reported.
+
+{
+   alsa-uninitialised-cond
+   Memcheck:Cond
+   obj:*/libasound.so*
+}
+{
+   alsa-uninitialised-value1
+   Memcheck:Value1
+   obj:*/libasound.so*
+}
+{
+   alsa-uninitialised-value2
+   Memcheck:Value2
+   obj:*/libasound.so*
+}
+{
+   alsa-uninitialised-value4
+   Memcheck:Value4
+   obj:*/libasound.so*
+}
+{
+   alsa-uninitialised-value8
+   Memcheck:Value8
+   obj:*/libasound.so*
+}
+{
+   alsa-reachable-at-exit
+   Memcheck:Leak
+   ...
+   obj:*/libasound.so*
+}
+
+{
+   portaudio-uninitialised-cond
+   Memcheck:Cond
+   obj:*/libportaudio.so*
+}
+{
+   portaudio-uninitialised-value8
+   Memcheck:Value8
+   obj:*/libportaudio.so*
+}
+{
+   portaudio-reachable-at-exit
+   Memcheck:Leak
+   ...
+   obj:*/libportaudio.so*
+}
+
+{
+   jack-uninitialised-cond
+   Memcheck:Cond
+   obj:*/libjack*.so*
+}
+{
+   jack-reachable-at-exit
+   Memcheck:Leak
+   ...
+   obj:*/libjack*.so*
+}

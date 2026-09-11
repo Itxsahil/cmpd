@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the in-flight run redundant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    # Pinned rather than ubuntu-latest: the decoder needs FFmpeg >= 5.1, and
+    # 22.04 still ships 4.4.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
+            portaudio19-dev libncurses-dev libtag1-dev
+
+      - name: Check dependency versions
+        run: make deps
+
+      - name: Provide a null ALSA device
+        # Runners have no sound card. Without a default device the output
+        # tests skip their device-backed checks; the null plugin lets them
+        # run for real.
+        run: printf 'pcm.!default { type null }\nctl.!default { type null }\n' > "$HOME/.asoundrc"
+
+      - name: Build
+        run: make
+
+      - name: Smoke test the binary
+        # Catches a binary that builds but cannot start, which unit tests
+        # linking the objects directly would not notice.
+        run: |
+          if ./cmpd; then
+            echo "expected a non-zero exit with no arguments"; exit 1
+          fi
+          ./cmpd 2>&1 | grep -q 'Usage:'
+
+      - name: Unit tests
+        run: make test
+
+      - name: AddressSanitizer and UndefinedBehaviorSanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: make test-asan
+
+      - name: ThreadSanitizer
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: make test-tsan
+
+      - name: Valgrind
+        run: |
+          sudo apt-get install -y --no-install-recommends valgrind
+          make valgrind

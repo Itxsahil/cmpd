@@ -10,3 +10,5 @@ obj-tsan/
 *.swo
 tags
 compile_commands.json
+dist/
+release-notes.md

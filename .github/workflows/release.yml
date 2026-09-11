@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, e.g. v0.1.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # Full history so the changelog can diff against the previous tag.
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=cmpd-${tag}-linux-x86_64" >> "$GITHUB_OUTPUT"
+          # A tag like v0.1.0-rc1 publishes as a prerelease.
+          case "$tag" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
+            portaudio19-dev libncurses-dev libtag1-dev
+
+      - name: Provide a null ALSA device
+        run: printf 'pcm.!default { type null }\nctl.!default { type null }\n' > "$HOME/.asoundrc"
+
+      - name: Test before releasing
+        run: |
+          make deps
+          make test
+
+      - name: Build release binary
+        run: |
+          make clean
+          make OPT="-O2 -DNDEBUG"
+          strip cmpd
+          ./cmpd 2>&1 | grep -q 'Usage:' || { echo "binary does not run"; exit 1; }
+
+      - name: Package
+        id: package
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -eu
+          mkdir -p "dist/$NAME"
+          cp cmpd todo.md "dist/$NAME/"
+
+          # The binary links against the system FFmpeg, PortAudio, ncurses and
+          # TagLib, so record what it actually needs at run time.
+          {
+            echo "cmpd $TAG — Linux x86_64"
+            echo
+            echo "Built on Ubuntu 24.04. Runtime packages:"
+            echo
+            echo "  sudo apt install libavformat60 libavcodec60 libavutil58 \\"
+            echo "                   libswresample4 libportaudio2 libncursesw6 libtag1v5"
+            echo
+            echo "Then run ./cmpd <music files...>"
+            echo
+            echo "On another distribution, or if the binary will not start,"
+            echo "build from source: make deps && make"
+            echo
+            echo "Shared libraries this binary was linked against:"
+            echo
+            ldd cmpd | sed 's/^/  /'
+          } > "dist/$NAME/INSTALL.txt"
+
+          tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+          ( cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+          ls -la dist
+
+      - name: Write release notes
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -eu
+          prev=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "tar -xzf ${{ steps.meta.outputs.name }}.tar.gz"
+            echo "cd ${{ steps.meta.outputs.name }}"
+            echo "sudo apt install libavformat60 libavcodec60 libavutil58 libswresample4 libportaudio2 libncursesw6 libtag1v5"
+            echo "./cmpd <music files...>"
+            echo '```'
+            echo
+            echo "Built on Ubuntu 24.04 for x86_64 and dynamically linked."
+            echo "See \`INSTALL.txt\` in the archive, or build from source with \`make\`."
+            echo "Verify the download with the accompanying \`.sha256\` file."
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty='- %s (%h)' "$prev..$TAG"
+            else
+              git log --no-merges --pretty='- %s (%h)' "$TAG"
+            fi
+          } > release-notes.md
+
+          cat release-notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          NAME: ${{ steps.meta.outputs.name }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -eu
+          flags=""
+          [ "$PRERELEASE" = "true" ] && flags="--prerelease"
+
+          # Re-running the workflow for a tag replaces the assets rather than
+          # failing on an existing release.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "cmpd $TAG" --notes-file release-notes.md $flags
+            gh release upload "$TAG" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" --clobber
+          else
+            gh release create "$TAG" --title "cmpd $TAG" --notes-file release-notes.md $flags \
+              "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: dist/*
+          if-no-files-found: error

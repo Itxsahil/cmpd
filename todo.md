@@ -4,12 +4,28 @@
 
     make            # build ./cmpd
     make test       # run the unit tests
-    make asan       # address + undefined behaviour build
-    make tsan       # data race build
-    make deps       # check that the dev packages are installed
+    make check      # tests under sanitizers and valgrind, as CI runs them
+    make asan       # build ./cmpd-asan (address + undefined behaviour)
+    make tsan       # build ./cmpd-tsan (data races)
+    make deps       # check the dev packages and FFmpeg version
 
-Dependencies: FFmpeg (libavformat, libavcodec, libavutil, libswresample),
-PortAudio, ncursesw, panelw and TagLib.
+Dependencies: FFmpeg 5.1 or newer (libavformat, libavcodec, libavutil,
+libswresample), PortAudio, ncursesw, panelw and TagLib. On Debian and Ubuntu:
+
+    sudo apt install build-essential pkg-config libavformat-dev \
+        libavcodec-dev libavutil-dev libswresample-dev portaudio19-dev \
+        libncurses-dev libtag1-dev
+
+## CI and releases
+
+`.github/workflows/ci.yml` builds and tests every push to `main` and every
+pull request, under AddressSanitizer, ThreadSanitizer and valgrind.
+
+`.github/workflows/release.yml` publishes a GitHub Release when a `v*` tag is
+pushed, or on manual dispatch with an existing tag. It tests first, then
+attaches a stripped x86_64 binary with a checksum:
+
+    git tag v0.1.0 && git push origin v0.1.0
 
 Set `CMPD_LOG` to capture the stderr that is otherwise discarded while the
 TUI owns the terminal.
